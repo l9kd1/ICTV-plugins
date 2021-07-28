@@ -40,10 +40,10 @@ from ictv.plugin_manager.plugin_utils import ChannelGate
 from ictv.plugins.rss.rss import feedparser_parse, get_content
 from ictv.renderer.renderer import Templates
 
-from ictv.flask.migration_adapter import FrankenFlask
+from ictv.flask.migration_adapter import FrankenFlask, render_jinja
+import ictv.flask.response as resp
 from ictv.common.utils import get_methods
 
-from web.contrib.template import render_jinja
 
 
 def get_app(ictv_app):
@@ -58,14 +58,6 @@ def get_app(ictv_app):
     app.renderer = render_jinja([os.path.join(os.path.dirname(__file__), 'templates/'),os.path.join(get_root_path(), 'templates/')])
     app.renderer._lookup.globals.update(**template_globals)
 
-    # Copying the ictv_app config
-    tmp_config = ictv_app.config.copy()
-    tmp_config.update(app.config)
-    app.config = tmp_config
-
-    # Duplicating the secret_key to make the session accessible
-    app.secret_key = ictv_app.secret_key
-
     # Registering views
     app.add_url_rule('/index', view_func=IndexPage.as_view('IndexPage'), methods=get_methods(IndexPage))
     app.add_url_rule('/feed', view_func=FeedGetter.as_view('FeedGetter'), methods=get_methods(FeedGetter))
@@ -76,7 +68,7 @@ def get_app(ictv_app):
     return app
 
 
-class RssPage(ICTVAuthPage):
+class RssPage(ICTVPage):
     plugin_app = None
 
     @property
@@ -118,14 +110,15 @@ class IndexPage(RssPage):
 class FeedGetter(RssPage):
     @ChannelGate.contributor
     def post(self, channel):
-        url = web.data().decode()
+        url = flask.request.get_data().decode()
         if FeedGetter._is_url(url):
-            web.header('Content-Type', 'application/json')
+            r = flask.Response(json.dumps(feedparser_parse(url).entries, cls=DateTimeEncoder))
+            r.headers["Content-Type"] = "application/json"
             try:
-                return json.dumps(feedparser_parse(url).entries, cls=DateTimeEncoder)
+                return r
             except TypeError:
                 return "Feed could not be parsed"
-        raise web.notfound()
+        return resp.notfound()
 
     @staticmethod
     def _is_url(url):
@@ -146,7 +139,7 @@ def post_process_config(config, channel):
 class ContentPage(RssPage):
     @ChannelGate.contributor
     def post(self, channel):
-        config = json.loads(web.data().decode())
+        config = json.loads(flask.request.get_data().decode())
         post_process_config(config, channel)
 
         capsules = []
@@ -164,12 +157,12 @@ class ContentPage(RssPage):
 class PreviewPage(RssPage):
     @ChannelGate.contributor
     def post(self, channel):
-        config = json.loads(web.input().config)
+        config = json.loads(self.form.config)
         post_process_config(config, channel)
         try:
             content = get_content(channel.id, config)
         except ValueError:
-            return web.badrequest()
+            return resp.badrequest()
 
         self.plugin_manager.dereference_assets(content)
         self.plugin_manager.cache_assets(content, channel.id)
