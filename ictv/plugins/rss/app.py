@@ -26,7 +26,7 @@ import traceback
 from urllib.parse import urlparse
 
 import builtins
-import web
+import flask
 
 from ictv.common import get_root_path
 from ictv.models.role import UserPermissions
@@ -35,36 +35,48 @@ from ictv.app import sidebar
 from ictv.common.feedbacks import get_feedbacks, get_next_feedbacks, pop_previous_form
 from ictv.common.json_datetime import DateTimeEncoder
 from ictv.pages.channel_page import ChannelPage
-from ictv.pages.utils import ICTVPage
+from ictv.pages.utils import ICTVPage, ICTVAuthPage
 from ictv.plugin_manager.plugin_utils import ChannelGate
 from ictv.plugins.rss.rss import feedparser_parse, get_content
 from ictv.renderer.renderer import Templates
 
-urls = (
-    'index', 'ictv.plugins.rss.app.IndexPage',
-    'feed', 'ictv.plugins.rss.app.FeedGetter',
-    'content', 'ictv.plugins.rss.app.ContentPage',
-    'preview', 'ictv.plugins.rss.app.PreviewPage'
-)
+from ictv.flask.migration_adapter import FrankenFlask
+from ictv.common.utils import get_methods
+
+from web.contrib.template import render_jinja
 
 
 def get_app(ictv_app):
-    app = web.application(urls, globals())
-    app.renderer = web.template.render(os.path.join(os.path.dirname(__file__), 'templates'),
-                                       base=os.path.join(get_root_path(), 'templates', 'base'),
-                                       globals={'session': ictv_app.session,
-                                                'get_feedbacks': get_feedbacks,
-                                                'get_next_feedbacks': get_next_feedbacks,
-                                                'pop_previous_form': pop_previous_form,
-                                                'UserPermissions': UserPermissions,
-                                                'str': str, 'sidebar_collapse': True, 'show_header': False,
-                                                'show_footer': False, 'User': User})
+    app = FrankenFlask(__name__)
+    template_globals = {'session': ictv_app.session,
+             'get_feedbacks': get_feedbacks,
+             'get_next_feedbacks': get_next_feedbacks,
+             'pop_previous_form': pop_previous_form,
+             'UserPermissions': UserPermissions,
+             'str': str, 'sidebar_collapse': True, 'show_header': False,
+             'show_footer': False, 'User': User,'base':'base.html'}
+    app.renderer = render_jinja([os.path.join(os.path.dirname(__file__), 'templates/'),os.path.join(get_root_path(), 'templates/')])
+    app.renderer._lookup.globals.update(**template_globals)
+
+    # Copying the ictv_app config
+    tmp_config = ictv_app.config.copy()
+    tmp_config.update(app.config)
+    app.config = tmp_config
+
+    # Duplicating the secret_key to make the session accessible
+    app.secret_key = ictv_app.secret_key
+
+    # Registering views
+    app.add_url_rule('/index', view_func=IndexPage.as_view('IndexPage'), methods=get_methods(IndexPage))
+    app.add_url_rule('/feed', view_func=FeedGetter.as_view('FeedGetter'), methods=get_methods(FeedGetter))
+    app.add_url_rule('/content', view_func=ContentPage.as_view('ContentPage'), methods=get_methods(ContentPage))
+    app.add_url_rule('/preview', view_func=PreviewPage.as_view('PreviewPage'), methods=get_methods(PreviewPage))
 
     RssPage.plugin_app = app
     return app
 
 
-class RssPage(ICTVPage):
+class RssPage(ICTVAuthPage):
     plugin_app = None
 
     @property
@@ -80,7 +92,7 @@ class RssPage(ICTVPage):
 class IndexPage(RssPage):
     @ChannelGate.contributor
     @sidebar
-    def GET(self, channel):
+    def get(self, channel):
         current_user = User.get(self.session['user']['id'])
         readable_params, writable_params = ChannelPage.get_params(channel, current_user)
 
@@ -91,7 +103,8 @@ class IndexPage(RssPage):
                 readable_params=readable_params,
                 writable_params=writable_params,
                 can_modify_cache=False,
-                can_modify_capsule_filter=False
+                can_modify_capsule_filter=False,
+                pattern=re.compile(r"list\[.*\]")
             )
 
         config_page = re.findall(rss, str(config_page))[0][0]
@@ -104,7 +117,7 @@ class IndexPage(RssPage):
 
 class FeedGetter(RssPage):
     @ChannelGate.contributor
-    def POST(self, channel):
+    def post(self, channel):
         url = web.data().decode()
         if FeedGetter._is_url(url):
             web.header('Content-Type', 'application/json')
@@ -132,7 +145,7 @@ def post_process_config(config, channel):
 
 class ContentPage(RssPage):
     @ChannelGate.contributor
-    def POST(self, channel):
+    def post(self, channel):
         config = json.loads(web.data().decode())
         post_process_config(config, channel)
 
@@ -150,7 +163,7 @@ class ContentPage(RssPage):
 
 class PreviewPage(RssPage):
     @ChannelGate.contributor
-    def POST(self, channel):
+    def post(self, channel):
         config = json.loads(web.input().config)
         post_process_config(config, channel)
         try:
